@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.utils.deep_linking import create_start_link
 
-TOKEN = "8720756817:AAFFksi2_kKScmLWlXVREa1WUtbcImAyeHE"
+TOKEN = "8720756817:AAFFksi2_kKScmLW1XVREa1WUtbcImAyeHE"
 ADMIN_IDS = [7919798306, 5275461907]
 
 bot = Bot(token=TOKEN)
