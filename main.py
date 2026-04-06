@@ -33,14 +33,26 @@ async def handle_message(message: types.Message):
     if message.reply_to_message and "пользователя" in message.reply_to_message.text:
         try:
             target_id = message.reply_to_message.text.split("`")[1]
+            
+            # Отправка получателю
             await bot.send_message(target_id, f"📥 Новый вопрос:\n\n{message.text}")
-            log = f"🕵️ Кому: {target_id}\nОт: {message.from_user.id}\nТекст: {message.text}"
+            
+            # Формируем лог для админов
+            sender = message.from_user
+            sender_info = f"@{sender.username}" if sender.username else f"{sender.full_name} (без юзера)"
+            
+            log = (f"🕵️ **ЛОГ АНОНИМКИ**\n\n"
+                   f"👤 **От кого:** {sender_info} [ID: `{sender.id}`]\n"
+                   f"🎯 **Кому (ID):** `{target_id}`\n"
+                   f"📝 **Текст:** {message.text}")
+
             for admin in ADMIN_IDS:
-                try: await bot.send_message(admin, log)
+                try: await bot.send_message(admin, log, parse_mode="Markdown")
                 except: pass
+                
             await message.answer("✅ Отправлено!")
         except Exception as e:
-            await message.answer(f"❌ Ошибка")
+            await message.answer(f"❌ Ошибка отправки")
     else:
         await message.answer("⚠️ Нажми 'Ответить' на сообщение выше!")
 
