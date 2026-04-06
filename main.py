@@ -21,38 +21,32 @@ async def start(message: types.Message):
     args = message.text.split()
     if len(args) > 1:
         target = args[1]
-        await message.answer(f"🤫 Пиши анонимно для пользователя {target}\n\n(Чтобы отправить, нажми на это сообщение и выбери 'Ответить')")
+        await message.answer(f"🤫 Пиши анонимно для пользователя `{target}`\n\n(Нажми на это сообщение и выбери 'Ответить')")
     else:
         init_db()
-        link = f"https://t.me/{(await bot.get_me()).username}?start={message.from_user.id}"
+        bot_info = await bot.get_me()
+        link = f"https://t.me/{bot_info.username}?start={message.from_user.id}"
         await message.answer(f"🔗 Твоя ссылка:\n{link}")
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
-    # Проверяем, ответил ли пользователь на сообщение бота с ID
-    if message.reply_to_message and "для пользователя" in message.reply_to_message.text:
+    if message.reply_to_message and "пользователя" in message.reply_to_message.text:
         try:
-            # Вытаскиваем ID из кавычек  
-            target_id = message.reply_to_message.text.split("")[1]
-            
-            # Отправляем получателю
-            await bot.send_message(target_id, f"📥 Новый анонимный вопрос:\n\n{message.text}")
-            
-            # Отправляем лог админам
-            log = f"🕵️ Лог:\nКому: {target_id}\nОт: {message.from_user.id}` ({message.from_user.full_name})\nТекст: {message.text}"
+            target_id = message.reply_to_message.text.split("`")[1]
+            await bot.send_message(target_id, f"📥 Новый вопрос:\n\n{message.text}")
+            log = f"🕵️ Кому: {target_id}\nОт: {message.from_user.id}\nТекст: {message.text}"
             for admin in ADMIN_IDS:
                 try: await bot.send_message(admin, log)
                 except: pass
-                
             await message.answer("✅ Отправлено!")
         except Exception as e:
-            await message.answer(f"❌ Ошибка: {e}")
+            await message.answer(f"❌ Ошибка")
     else:
-        await message.answer("⚠️ Чтобы отправить вопрос, нажми на сообщение бота выше и выбери 'Ответить'!")
+        await message.answer("⚠️ Нажми 'Ответить' на сообщение выше!")
 
 async def main():
     init_db()
     await dp.start_polling(bot)
 
-if name == "main":
+if __name__ == "__main__":
     asyncio.run(main())
