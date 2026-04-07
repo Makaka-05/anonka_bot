@@ -3,15 +3,26 @@ import sqlite3
 import re
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.client.default import DefaultBotProperties
 
-# --- ТВОИ ДАННЫЕ (НЕ ЗАБУДЬ ID ГРУППЫ!) ---
+# --- НАСТРОЙКИ ---
 TOKEN = "8720756817:AAFFksi2_kKScmLW1XVREa1WUtbcImAyeHE"
 ADMIN_IDS = [7919798306, 5275461907]
-GROUP_ID = -1003784828350  # <--- ВСТАВЬ СЮДА ID ГРУППЫ ИЗ @getmyid_bot
+GROUP_ID = -1003784828350  # <--- ОБЯЗАТЕЛЬНО ЗАМЕНИ НА ID СВОЕЙ ГРУППЫ
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher()
+
+# --- КЛАВИАТУРА ---
+def get_main_keyboard(user_id):
+    buttons = [
+        [KeyboardButton(text="👤 Моя личная ссылка")],
+        [KeyboardButton(text="📢 Ссылка для группы")]
+    ]
+    if user_id in ADMIN_IDS:
+        buttons.append([KeyboardButton(text="📊 Статистика")])
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
 def init_db():
     conn = sqlite3.connect("users.db")
@@ -22,64 +33,76 @@ def init_db():
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
+    init_db()
+    conn = sqlite3.connect("users.db")
+    conn.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (message.from_user.id,))
+    conn.commit()
+    conn.close()
+
     args = message.text.split()
-    
-    # 1. Если перешли по ссылке для ГРУППЫ (?start=group)
+    # Если перешли по ссылке для группы
     if len(args) > 1 and args[1] == "group":
-        await message.answer(
-            "📢 <b>Режим отправки в группу</b>\n\nНапиши сообщение ниже, и я опубликую его анонимно в нашей группе!\n\n(Обязательно нажми на это сообщение и выбери <b>'Ответить'</b>)"
-        )
-    
-    # 2. Если перешли по ЛИЧНОЙ ссылке (?start=12345)
+        await message.answer("📢 <b>Режим отправки в группу</b>\n\nНапиши сообщение ниже (нажми 'Ответить'), и я опубликую его в группе!", reply_markup=get_main_keyboard(message.from_user.id))
+    # Если по личной ссылке
     elif len(args) > 1 and args[1].isdigit():
-        target = args[1]
-        await message.answer(f"🤫 Пиши анонимно для пользователя <code>{target}</code>\n\n(Нажми на это сообщение и выбери <b>'Ответить'</b>)")
-    
-    # 3. Обычный старт (создание своей ссылки)
+        await message.answer(f"🤫 Пиши анонимно для пользователя <code>{args[1]}</code>\n\n(Нажми 'Ответить')", reply_markup=get_main_keyboard(message.from_user.id))
     else:
-        init_db()
-        bot_user = await bot.get_me()
-        my_link = f"https://t.me/{bot_user.username}?start={message.from_user.id}"
-        group_link = f"https://t.me/{bot_user.username}?start=group"
-        
-        text = (
-            f"👋 <b>Твои ссылки:</b>\n\n"
-            f"👤 <b>Для личных вопросов:</b>\n<code>{my_link}</code>\n\n"
-            f"📢 <b>Для вопросов в группу (закрепи её там):</b>\n<code>{group_link}</code>"
-        )
-        await message.answer(text)
+        await message.answer("Привет! Выбери нужную ссылку в меню ниже:", reply_markup=get_main_keyboard(message.from_user.id))
+
+# --- ОБРАБОТКА КНОПОК ---
+
+@dp.message(F.text == "👤 Моя личная ссылка")
+async def show_personal_link(message: types.Message):
+    me = await bot.get_me()
+    link = f"https://t.me/{me.username}?start={message.from_user.id}"
+    await message.answer(f"Твоя личная ссылка (для вопросов тебе):\n<code>{link}</code>")
+
+@dp.message(F.text == "📢 Ссылка для группы")
+async def show_group_link(message: types.Message):
+    me = await bot.get_me()
+    link = f"https://t.me/{me.username}?start=group"
+    await message.answer(f"Ссылка для закрепа в группе (для анонимок в чат):\n<code>{link}</code>")
+
+@dp.message(F.text == "📊 Статистика")
+async def show_stats(message: types.Message):
+    if message.from_user.id in ADMIN_IDS:
+        conn = sqlite3.connect("users.db")
+        count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        conn.close()
+        await message.answer(f"Всего пользователей: <b>{count}</b>")
+
+# --- ОБРАБОТКА АНОНИМОК ---
 
 @dp.message(F.text)
-async def handle_messages(message: types.Message):
+async def handle_msg(message: types.Message):
     if not message.reply_to_message:
         return
 
-    # ПРОВЕРЯЕМ: Опубликовать в ГРУППУ
-    if "опубликую его анонимно в нашей группе" in message.reply_to_message.text:
+    # Отправка в группу
+    if "опубликую его в группе" in message.reply_to_message.text:
         try:
             await bot.send_message(GROUP_ID, f"📥 <b>Новое анонимное сообщение:</b>\n\n{message.text}")
-            await message.answer("✅ Твой вопрос опубликован в группе!")
+            await message.answer("✅ Опубликовано в группе!")
             await notify_admins(message, "В ГРУППУ")
-        except Exception as e:
-            await message.answer(f"❌ Ошибка: проверь, есть ли бот в группе и админ ли он.")
+        except:
+            await message.answer("❌ Ошибка: бот не может отправить сообщение в группу. Проверь ID и права админа!")
 
-    # ПРОВЕРЯЕМ: Отправить ЛИЧНО
+    # Личная отправка
     elif "Пиши анонимно для пользователя" in message.reply_to_message.text:
         try:
             target_id = re.findall(r'\d+', message.reply_to_message.text)[0]
             await bot.send_message(target_id, f"📥 <b>Новый анонимный вопрос:</b>\n\n{message.text}")
-            await message.answer("✅ Доставлено лично!")
-            await notify_admins(message, f"ЛИЧНО пользователю {target_id}")
+            await message.answer("✅ Отправлено лично!")
+            await notify_admins(message, f"ЛИЧНО (ID {target_id})")
         except:
-            await message.answer("❌ Ошибка отправки.")
+            await message.answer("❌ Ошибка доставки.")
 
 async def notify_admins(message, mode):
     u = message.from_user
     u_link = f"<a href='tg://user?id={u.id}'>{u.full_name}</a>"
-    un = f" (@{u.username})" if u.username else ""
-    log = f"🕵️ <b>ЛОГ</b>\n<b>От:</b> {u_link}{un}\n<b>Куда:</b> {mode}\n<b>Текст:</b> {message.text}"
-    for admin in ADMIN_IDS:
-        try: await bot.send_message(admin, log)
+    log = f"🕵️ <b>ЛОГ</b>\nОт: {u_link}\nКуда: {mode}\nТекст: {message.text}"
+    for admin_id in ADMIN_IDS:
+        try: await bot.send_message(admin_id, log)
         except: pass
 
 async def main():
@@ -88,4 +111,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
