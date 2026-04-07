@@ -117,10 +117,26 @@ async def handle_msg(message: types.Message):
 
 async def notify_admins(message, mode):
     u = message.from_user
-    log = f"🕵️ <b>ЛОГ</b>\nОт: <a href='tg://user?id={u.id}'>{u.full_name}</a>\nКуда: {mode}\nТекст: {message.text}"
-    for admin in ADMIN_IDS:
-        try: await bot.send_message(admin, log)
-        except: pass
+    # Создаем красивую ссылку на имя
+    user_link = f"<a href='tg://user?id={u.id}'>{u.full_name}</a>"
+    
+    # Добавляем юзернейм, если он есть (будет подсвечиваться синим)
+    username = f" (@{u.username})" if u.username else ""
+    
+    # Формируем лог
+    log = (
+        f"🕵️ <b>НОВЫЙ ЛОГ</b>\n\n"
+        f"👤 <b>От:</b> {user_link}{username}\n"
+        f"🆔 <b>ID:</b> <code>{u.id}</code>\n"
+        f"🎯 <b>Куда:</b> {mode}\n"
+        f"📝 <b>Текст:</b> {message.text}"
+    )
+    
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, log)
+        except Exception as e:
+            print(f"Ошибка логирования для {admin_id}: {e}")
 
 async def main():
     init_db()
