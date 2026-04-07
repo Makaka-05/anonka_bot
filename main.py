@@ -7,7 +7,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.client.default import DefaultBotProperties
 
 # --- НАСТРОЙКИ (ЗАПОЛНИ СВОИ ID) ---
-TOKEN = "8720756817:AAFFksi2_kKScmLWlXVREa1WUtbcImAyeHE"
+TOKEN = "8720756817:AAFFksi2_kKScmLW1XVREa1WUtbcImAyeHE"
 ADMIN_IDS = [7919798306, 5275461907] # Ты и твой друг
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
