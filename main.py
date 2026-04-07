@@ -1,4 +1,4 @@
-iimport asyncio
+import asyncio
 import sqlite3
 import re
 from aiogram import Bot, Dispatcher, types, F
