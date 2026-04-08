@@ -1,11 +1,7 @@
 import asyncio
 import sqlite3
 import re
-from aiogram import Bot, Dispatcher, types, F
-import asyncio
-import sqlite3
-import re
-import time  # Нужно для замера времени
+import time
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
@@ -14,12 +10,12 @@ from aiogram.client.default import DefaultBotProperties
 # --- НАСТРОЙКИ ---
 TOKEN = "8720756817:AAFFksi2_kKScmLW1XVREa1WUtbcImAyeHE"
 ADMIN_IDS = [7919798306, 5275461907]
-COOLDOWN_SECONDS = 5  # Задержка между сообщениями (в секундах)
+COOLDOWN_SECONDS = 5  # Строго 5 секунд задержки
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher()
 
-# Словарь для хранения времени последнего сообщения: {user_id: timestamp}
+# Словарь для антифлуда: {user_id: время_последнего_действия}
 user_cooldowns = {}
 
 # --- БАЗА ДАННЫХ ---
@@ -36,7 +32,7 @@ def get_main_kb(user_id):
     if user_id in ADMIN_IDS: kb.append([KeyboardButton(text="📊 Статистика")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-# Проверка на спам
+# Функция проверки флуда
 def is_flooding(user_id):
     current_time = time.time()
     last_time = user_cooldowns.get(user_id, 0)
@@ -59,11 +55,11 @@ async def notify_admins(message, mode, target_user=None):
         try: await bot.send_message(admin_id, log)
         except: pass
 
-# --- ОБРАБОТКА КОМАНД ---
+# --- ОБРАБОТЧИКИ ---
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    if is_flooding(message.from_user.id): return # Игнорим спам
+    if is_flooding(message.from_user.id): return # Блокировка
     init_db()
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("-100"):
@@ -73,44 +69,50 @@ async def start(message: types.Message):
     else:
         await message.answer("Привет! Выбери действие:", reply_markup=get_main_kb(message.from_user.id))
 
-@dp.message(F.text == "/setup")
-async def setup_group(message: types.Message):
-    if message.chat.type in ["group", "supergroup"]:
-        me = await bot.get_me()
-        await message.answer(f"✅ Группа готова!\nСсылка: <code>https://t.me/{me.username}?start={message.chat.id}</code>")
-
 @dp.message(F.text == "👤 Моя личная ссылка")
 async def show_my_link(message: types.Message):
-    if is_flooding(message.from_user.id): return
+    if is_flooding(message.from_user.id): return # Блокировка
     me = await bot.get_me()
     await message.answer(f"Твоя ссылка:\n<code>https://t.me/{me.username}?start={message.from_user.id}</code>")
 
 @dp.message(F.text == "➕ Подключить группу")
 async def how_to_connect(message: types.Message):
-    if is_flooding(message.from_user.id): return
+    if is_flooding(message.from_user.id): return # Блокировка
     await message.answer("Чтобы подключить группу, добавь бота в админы и напиши <code>/setup</code>")
 
-# --- ГЛАВНЫЙ ОБРАБОТЧИК ---
+@dp.message(F.text == "/setup")
+async def setup_group(message: types.Message):
+    # В группах антифлуд обычно не ставят, чтобы не мешать всем, но если надо — можно добавить
+    if message.chat.type in ["group", "supergroup"]:
+        me = await bot.get_me()
+        await message.answer(f"✅ Группа готова!\nСсылка: <code>https://t.me/{me.username}?start={message.chat.id}</code>")
+
+@dp.message(F.text == "📊 Статистика")
+async def show_stats(message: types.Message):
+    if message.from_user.id in ADMIN_IDS:
+        if is_flooding(message.from_user.id): return
+        conn = sqlite3.connect("anonymous_pro.db")
+        count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        conn.close()
+        await message.answer(f"📈 Пользователей в базе: {count}")
 
 @dp.message(F.text)
 async def handle_all_messages(message: types.Message):
-    # Проверка на спам для всех сообщений
-    if is_flooding(message.from_user.id):
-        return
+    if is_flooding(message.from_user.id): return # Блокировка любого текста
 
     if not message.reply_to_message: return
     reply_text = message.reply_to_message.text
 
-    # 1. ОТПРАВКА В ГРУППУ
+    # 1. В ГРУППУ
     if "Анонимка в группу" in reply_text:
         try:
             target_group = re.findall(r'-100\d+', reply_text)[0]
             await bot.send_message(target_group, f"📥 <b>Анонимно:</b>\n\n{message.text}")
             await message.answer("✅ Опубликовано!")
             await notify_admins(message, f"ГРУППА {target_group}")
-        except: await message.answer("❌ Ошибка группы.")
+        except: await message.answer("❌ Ошибка отправки.")
 
-    # 2. ЛИЧНАЯ ОТПРАВКА
+    # 2. ЛИЧНО (Аноним -> Юзеру)
     elif "Пиши анонимно для ID" in reply_text:
         target_id = re.findall(r'\d+', reply_text)[0]
         try:
@@ -122,9 +124,9 @@ async def handle_all_messages(message: types.Message):
             await message.answer("✅ Доставлено!")
             target_chat = await bot.get_chat(target_id)
             await notify_admins(message, "ЛИЧНО", target_user=target_chat)
-        except: await message.answer("❌ Ошибка доставки.")
+        except: await message.answer("❌ Пользователь заблокировал бота.")
 
-    # 3. ОТВЕТ НА АНОНИМКУ
+    # 3. ОТВЕТ (Юзер -> Анониму)
     elif "Новый анонимный вопрос" in reply_text:
         conn = sqlite3.connect("anonymous_pro.db")
         res = conn.execute("SELECT author_id FROM replies WHERE msg_id = ?", (message.reply_to_message.message_id,)).fetchone()
@@ -133,7 +135,7 @@ async def handle_all_messages(message: types.Message):
             try:
                 await bot.send_message(res[0], f"💬 <b>Тебе пришел ответ на вопрос:</b>\n\n{message.text}")
                 await message.answer("✅ Ответ отправлен!")
-            except: await message.answer("❌ Ошибка (юзер заблокал бота).")
+            except: await message.answer("❌ Не удалось отправить ответ.")
 
 async def main():
     init_db()
