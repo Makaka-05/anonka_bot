@@ -7,9 +7,9 @@ from aiogram.filters import CommandStart
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.client.default import DefaultBotProperties
 
-# --- НАСТРОЙКИ ---
+# Данные твоего бота
 TOKEN = "8720756817:AAFFksi2_kKScmLW1XVREa1WUtbcImAyeHE"
-COOLDOWN_SECONDS = 5 
+COOLDOWN = 5 
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher()
@@ -21,59 +21,55 @@ def init_db():
     conn.commit()
     conn.close()
 
-def get_main_kb():
-    kb = [[KeyboardButton(text="👤 Моя личная ссылка")], [KeyboardButton(text="➕ Подключить группу")]]
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+def get_kb():
+    buttons = [[KeyboardButton(text="👤 Моя личная ссылка")], [KeyboardButton(text="➕ Подключить группу")]]
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-def is_spam(user_id):
-    curr = time.time()
-    last = user_last_time.get(user_id, 0)
-    if curr - last < COOLDOWN_SECONDS:
+def is_spam(uid):
+    now = time.time()
+    if uid in user_last_time and now - user_last_time[uid] < COOLDOWN:
         return True
-    user_last_time[user_id] = curr
+    user_last_time[uid] = now
     return False
 
-# --- ОБРАБОТЧИКИ ---
-
 @dp.message(CommandStart())
-async def start(message: types.Message):
+async def cmd_start(message: types.Message):
     if message.chat.type != "private":
-        await message.answer("Кнопки только в ЛС!", reply_markup=ReplyKeyboardRemove())
-        return
+        return await message.answer("Кнопки только в ЛС!", reply_markup=ReplyKeyboardRemove())
     if is_spam(message.from_user.id): return
     init_db()
-    await message.answer("Привет! Используй кнопки:", reply_markup=get_main_kb())
+    await message.answer("Привет! Выбери действие:", reply_markup=get_kb())
 
 @dp.message(F.text == "👤 Моя личная ссылка")
-async def show_link(message: types.Message):
+async def link(message: types.Message):
     if message.chat.type != "private":
-        await message.answer("Только в ЛС!", reply_markup=ReplyKeyboardRemove())
-        return
+        return await message.answer("Кнопки только в ЛС!", reply_markup=ReplyKeyboardRemove())
     if is_spam(message.from_user.id): return
     me = await bot.get_me()
-    await message.answer(f"Твоя ссылка: <code>https://t.me/{me.username}?start={message.from_user.id}</code>")
+    await message.answer(f"Твоя ссылка:\n<code>https://t.me/{me.username}?start={message.from_user.id}</code>")
 
 @dp.message(F.text == "/setup")
-async def setup_group(message: types.Message):
+async def setup(message: types.Message):
     if message.chat.type in ["group", "supergroup"]:
         await message.answer(f"✅ Готово! Кнопки удалены.", reply_markup=ReplyKeyboardRemove())
 
 @dp.message()
-async def handle_all(message: types.Message):
+async def global_handler(message: types.Message):
     if message.chat.type == "private" and is_spam(message.from_user.id): return
 
-    # ЗАЩИТА: Проверяем, что это ответ и в нем есть ТЕКСТ
+    # ИСПРАВЛЕНИЕ ОШИБКИ: проверяем, что это ответ и в нем есть ТЕКСТ
     if not message.reply_to_message or not message.reply_to_message.text:
         return
+    
+    ref = message.reply_to_message.text
 
-    r_text = message.reply_to_message.text
-
-    if "Напиши сообщение в ответ" in r_text:
-        target_id = re.findall(r'-?\d+', r_text)
-        if target_id:
+    if "Напиши сообщение в ответ" in ref:
+        ids = re.findall(r'-?\d+', ref)
+        if ids:
             try:
-                sent = await bot.send_message(target_id[0], f"📩 <b>Анонимка:</b>\n\n{message.text}")
-                if not str(target_id[0]).startswith("-"):
+                target = ids[0]
+                sent = await bot.send_message(target, f"📩 <b>Новая анонимка:</b>\n\n{message.text}")
+                if not str(target).startswith("-"):
                     conn = sqlite3.connect("anonymous_pro.db")
                     conn.execute("INSERT INTO replies VALUES (?, ?)", (sent.message_id, message.from_user.id))
                     conn.commit()
@@ -81,18 +77,18 @@ async def handle_all(message: types.Message):
                 await message.answer("✅ Отправлено!")
             except: await message.answer("❌ Ошибка.")
 
-    elif "Анонимка:" in r_text:
+    elif "Новая анонимка" in ref:
         conn = sqlite3.connect("anonymous_pro.db")
         res = conn.execute("SELECT author_id FROM replies WHERE msg_id = ?", (message.reply_to_message.message_id,)).fetchone()
         conn.close()
         if res:
             try:
-                await bot.send_message(res[0], f"💬 <b>Ответ:</b>\n\n{message.text}")
+                await bot.send_message(res[0], f"💬 <b>Тебе ответили:</b>\n\n{message.text}")
                 await message.answer("✅ Доставлено!")
             except: await message.answer("❌ Ошибка.")
 
 async def main():
-    print("--- БОТ ЗАПУЩЕН БЕЗ ОШИБОК ---")
+    print("БОТ ЗАПУЩЕН")
     init_db()
     await dp.start_polling(bot)
 
