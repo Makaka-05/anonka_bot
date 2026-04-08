@@ -15,7 +15,7 @@ COOLDOWN_SECONDS = 5
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher()
 
-# Хранилище времени последнего действия (в памяти)
+# Хранилище времени последнего действия
 user_last_time = {}
 
 def init_db():
@@ -32,7 +32,6 @@ def get_main_kb(user_id):
         kb.append([KeyboardButton(text="📊 Статистика")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-# Функция задержки: вернет True, если это спам
 def is_spam(user_id):
     curr = time.time()
     last = user_last_time.get(user_id, 0)
@@ -45,9 +44,9 @@ def is_spam(user_id):
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    # Если старт в группе — ЖЕСТКО удаляем кнопки
+    # Если старт в группе — удаляем кнопки
     if message.chat.type != "private":
-        await message.answer("Кнопки только для личных сообщений бота!", reply_markup=ReplyKeyboardRemove())
+        await message.answer("Кнопки доступны только в ЛС бота.", reply_markup=ReplyKeyboardRemove())
         return
 
     if is_spam(message.from_user.id): return
@@ -57,17 +56,15 @@ async def start(message: types.Message):
     if len(args) > 1:
         await message.answer("🤫 Напиши сообщение в ответ на это (Reply), чтобы отправить его анонимно.")
     else:
-        await message.answer("Привет! Кнопки управления доступны ниже:", reply_markup=get_main_kb(message.from_user.id))
+        await message.answer("Привет! Используй кнопки ниже:", reply_markup=get_main_kb(message.from_user.id))
 
 @dp.message(F.text == "👤 Моя личная ссылка")
 async def my_link(message: types.Message):
-    # Если вдруг кнопка осталась в группе и её нажали
     if message.chat.type != "private":
-        await message.answer("Удаляю кнопки...", reply_markup=ReplyKeyboardRemove())
+        await message.answer("Кнопки только для ЛС!", reply_markup=ReplyKeyboardRemove())
         return
     
     if is_spam(message.from_user.id): return
-    
     me = await bot.get_me()
     await message.answer(f"Твоя ссылка:\n<code>https://t.me/{me.username}?start={message.from_user.id}</code>")
 
@@ -84,7 +81,10 @@ async def handle_msg(message: types.Message):
     if message.chat.type == "private" and is_spam(message.from_user.id):
         return
 
-    if not message.reply_to_message: return
+    # Защита от падения: проверяем, что это ВООБЩЕ ответ
+    if not message.reply_to_message or not message.reply_to_message.text:
+        return
+
     r_text = message.reply_to_message.text
 
     # Отправка анонимки
@@ -93,7 +93,7 @@ async def handle_msg(message: types.Message):
         if ids:
             target = ids[0]
             try:
-                sent = await bot.send_message(target, f"📩 <b>Новая анонимка:</b>\n\n{message.text}")
+                sent = await bot.send_message(target, f"📩 <b>Новая анонимка:</b>\n\n{message.text}\n\n<i>(Ответь на это сообщение)</i>")
                 if not target.startswith("-"):
                     conn = sqlite3.connect("anonymous_pro.db")
                     conn.execute("INSERT INTO replies VALUES (?, ?)", (sent.message_id, message.from_user.id))
@@ -103,7 +103,7 @@ async def handle_msg(message: types.Message):
             except:
                 await message.answer("❌ Ошибка.")
 
-    # Ответ
+    # Ответ на анонимку
     elif "Новая анонимка" in r_text:
         conn = sqlite3.connect("anonymous_pro.db")
         res = conn.execute("SELECT author_id FROM replies WHERE msg_id = ?", (message.reply_to_message.message_id,)).fetchone()
@@ -111,14 +111,15 @@ async def handle_msg(message: types.Message):
         if res:
             try:
                 await bot.send_message(res[0], f"💬 <b>Тебе ответили:</b>\n\n{message.text}")
-                await message.answer("✅ Ответ отправлен!")
+                await message.answer("✅ Ответ доставлен!")
             except:
                 await message.answer("❌ Ошибка.")
 
 async def main():
-    print("--- БОТ ЗАПУЩЕН С ЗАЩИТОЙ ---")
+    print("--- БОТ ЗАПУЩЕН И ЗАЩИЩЕН ---")
     init_db()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
