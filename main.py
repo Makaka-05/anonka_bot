@@ -2,6 +2,11 @@ import asyncio
 import sqlite3
 import re
 from aiogram import Bot, Dispatcher, types, F
+import asyncio
+import sqlite3
+import re
+import time  # Нужно для замера времени
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.client.default import DefaultBotProperties
@@ -9,20 +14,20 @@ from aiogram.client.default import DefaultBotProperties
 # --- НАСТРОЙКИ ---
 TOKEN = "8720756817:AAFFksi2_kKScmLW1XVREa1WUtbcImAyeHE"
 ADMIN_IDS = [7919798306, 5275461907]
+COOLDOWN_SECONDS = 5  # Задержка между сообщениями (в секундах)
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher()
+
+# Словарь для хранения времени последнего сообщения: {user_id: timestamp}
+user_cooldowns = {}
 
 # --- БАЗА ДАННЫХ ---
 def init_db():
     conn = sqlite3.connect("anonymous_pro.db")
     cursor = conn.cursor()
     cursor.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)")
-    # Новая таблица для ответов: связываем ID сообщения у получателя с ID анонима
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS replies 
-        (msg_id INTEGER PRIMARY KEY, author_id INTEGER)
-    """)
+    cursor.execute("CREATE TABLE IF NOT EXISTS replies (msg_id INTEGER PRIMARY KEY, author_id INTEGER)")
     conn.commit()
     conn.close()
 
@@ -30,6 +35,15 @@ def get_main_kb(user_id):
     kb = [[KeyboardButton(text="👤 Моя личная ссылка")], [KeyboardButton(text="➕ Подключить группу")]]
     if user_id in ADMIN_IDS: kb.append([KeyboardButton(text="📊 Статистика")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+# Проверка на спам
+def is_flooding(user_id):
+    current_time = time.time()
+    last_time = user_cooldowns.get(user_id, 0)
+    if current_time - last_time < COOLDOWN_SECONDS:
+        return True
+    user_cooldowns[user_id] = current_time
+    return False
 
 async def notify_admins(message, mode, target_user=None):
     u = message.from_user
@@ -40,7 +54,7 @@ async def notify_admins(message, mode, target_user=None):
         t_link = f"<a href='tg://user?id={target_user.id}'>{target_user.full_name}</a>"
         target_info = f"\n🎯 <b>Кому:</b> {t_link}"
 
-    log = f"🕵️ <b>ЛОГ</b>\n👤 <b>От:</b> {sender_link}{sender_un}\n📍 <b>Тип:</b> {mode}{target_info}\n📝 <b>Текст:</b> {message.text}"
+    log = f"🕵️ <b>ЛОГ</b>\n👤 <b>От:</b> {sender_link}{sender_un}\n🆔: <code>{u.id}</code>\n📍 <b>Тип:</b> {mode}{target_info}\n📝 <b>Текст:</b> {message.text}"
     for admin_id in ADMIN_IDS:
         try: await bot.send_message(admin_id, log)
         except: pass
@@ -49,6 +63,7 @@ async def notify_admins(message, mode, target_user=None):
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
+    if is_flooding(message.from_user.id): return # Игнорим спам
     init_db()
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("-100"):
@@ -66,13 +81,23 @@ async def setup_group(message: types.Message):
 
 @dp.message(F.text == "👤 Моя личная ссылка")
 async def show_my_link(message: types.Message):
+    if is_flooding(message.from_user.id): return
     me = await bot.get_me()
     await message.answer(f"Твоя ссылка:\n<code>https://t.me/{me.username}?start={message.from_user.id}</code>")
+
+@dp.message(F.text == "➕ Подключить группу")
+async def how_to_connect(message: types.Message):
+    if is_flooding(message.from_user.id): return
+    await message.answer("Чтобы подключить группу, добавь бота в админы и напиши <code>/setup</code>")
 
 # --- ГЛАВНЫЙ ОБРАБОТЧИК ---
 
 @dp.message(F.text)
 async def handle_all_messages(message: types.Message):
+    # Проверка на спам для всех сообщений
+    if is_flooding(message.from_user.id):
+        return
+
     if not message.reply_to_message: return
     reply_text = message.reply_to_message.text
 
@@ -85,36 +110,30 @@ async def handle_all_messages(message: types.Message):
             await notify_admins(message, f"ГРУППА {target_group}")
         except: await message.answer("❌ Ошибка группы.")
 
-    # 2. ЛИЧНАЯ ОТПРАВКА (Аноним пишет пользователю)
+    # 2. ЛИЧНАЯ ОТПРАВКА
     elif "Пиши анонимно для ID" in reply_text:
         target_id = re.findall(r'\d+', reply_text)[0]
         try:
-            sent_msg = await bot.send_message(target_id, f"📩 <b>Новый анонимный вопрос:</b>\n\n{message.text}\n\n<i>(Чтобы ответить, нажми 'Ответить' на это сообщение)</i>")
-            
-            # ЗАПОМИНАЕМ КТО НАПИСАЛ (для ответа)
+            sent_msg = await bot.send_message(target_id, f"📩 <b>Новый анонимный вопрос:</b>\n\n{message.text}\n\n<i>(Чтобы ответить, нажми 'Ответить')</i>")
             conn = sqlite3.connect("anonymous_pro.db")
             conn.execute("INSERT INTO replies VALUES (?, ?)", (sent_msg.message_id, message.from_user.id))
             conn.commit()
             conn.close()
-
             await message.answer("✅ Доставлено!")
             target_chat = await bot.get_chat(target_id)
             await notify_admins(message, "ЛИЧНО", target_user=target_chat)
         except: await message.answer("❌ Ошибка доставки.")
 
-    # 3. ОТВЕТ НА АНОНИМКУ (Пользователь отвечает анониму)
+    # 3. ОТВЕТ НА АНОНИМКУ
     elif "Новый анонимный вопрос" in reply_text:
         conn = sqlite3.connect("anonymous_pro.db")
         res = conn.execute("SELECT author_id FROM replies WHERE msg_id = ?", (message.reply_to_message.message_id,)).fetchone()
         conn.close()
-
         if res:
             try:
-                await bot.send_message(res[0], f"💬 <b>Тебе пришел ответ на твой вопрос:</b>\n\n{message.text}")
-                await message.answer("✅ Твой ответ отправлен анониму!")
-            except: await message.answer("❌ Не удалось отправить ответ (юзер заблокировал бота).")
-        else:
-            await message.answer("❌ Ошибка: я не нашел, кому отвечать (возможно, сообщение слишком старое).")
+                await bot.send_message(res[0], f"💬 <b>Тебе пришел ответ на вопрос:</b>\n\n{message.text}")
+                await message.answer("✅ Ответ отправлен!")
+            except: await message.answer("❌ Ошибка (юзер заблокал бота).")
 
 async def main():
     init_db()
@@ -122,5 +141,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
-
