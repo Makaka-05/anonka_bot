@@ -25,7 +25,6 @@ def get_main_kb():
     kb = [[KeyboardButton(text="👤 Моя личная ссылка")], [KeyboardButton(text="➕ Подключить группу")]]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-# Функция проверки задержки
 def is_spam(user_id):
     curr = time.time()
     last = user_last_time.get(user_id, 0)
@@ -54,31 +53,22 @@ async def show_link(message: types.Message):
     me = await bot.get_me()
     await message.answer(f"Твоя ссылка: <code>https://t.me/{me.username}?start={message.from_user.id}</code>")
 
-@dp.message(F.text == "➕ Подключить группу")
-async def connect_group(message: types.Message):
-    if message.chat.type != "private": return
-    if is_spam(message.from_user.id): return
-    await message.answer("Добавь бота в админы группы и напиши там /setup")
-
 @dp.message(F.text == "/setup")
 async def setup_group(message: types.Message):
     if message.chat.type in ["group", "supergroup"]:
-        me = await bot.get_me()
-        await message.answer(f"✅ Готово! Ссылка: <code>https://t.me/{me.username}?start={message.chat.id}</code>", reply_markup=ReplyKeyboardRemove())
+        await message.answer(f"✅ Готово! Кнопки удалены.", reply_markup=ReplyKeyboardRemove())
 
 @dp.message()
 async def handle_all(message: types.Message):
-    # Если это ЛС и юзер спамит — игнорим
     if message.chat.type == "private" and is_spam(message.from_user.id): return
 
-    # ЗАЩИТА ОТ ТВОЕЙ ОШИБКИ (проверяем, что это ответ и в нем есть ТЕКСТ)
+    # ЗАЩИТА: Проверяем, что это ответ и в нем есть ТЕКСТ
     if not message.reply_to_message or not message.reply_to_message.text:
         return
 
     r_text = message.reply_to_message.text
 
-    # Логика анонимки
-    if "Напиши сообщение в ответ" in r_text or "анонимно для ID" in r_text:
+    if "Напиши сообщение в ответ" in r_text:
         target_id = re.findall(r'-?\d+', r_text)
         if target_id:
             try:
@@ -91,7 +81,6 @@ async def handle_all(message: types.Message):
                 await message.answer("✅ Отправлено!")
             except: await message.answer("❌ Ошибка.")
 
-    # Логика ответа
     elif "Анонимка:" in r_text:
         conn = sqlite3.connect("anonymous_pro.db")
         res = conn.execute("SELECT author_id FROM replies WHERE msg_id = ?", (message.reply_to_message.message_id,)).fetchone()
@@ -103,7 +92,7 @@ async def handle_all(message: types.Message):
             except: await message.answer("❌ Ошибка.")
 
 async def main():
-    print("БОТ ЗАПУЩЕН БЕЗ ОШИБОК")
+    print("--- БОТ ЗАПУЩЕН БЕЗ ОШИБОК ---")
     init_db()
     await dp.start_polling(bot)
 
