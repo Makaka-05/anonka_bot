@@ -10,12 +10,12 @@ from aiogram.client.default import DefaultBotProperties
 # --- НАСТРОЙКИ ---
 TOKEN = "8720756817:AAFFksi2_kKScmLW1XVREa1WUtbcImAyeHE"
 ADMIN_IDS = [7919798306, 5275461907]
-COOLDOWN_SECONDS = 5  # Строго 5 секунд задержки
+COOLDOWN_SECONDS = 5 
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher()
 
-# Словарь для антифлуда: {user_id: время_последнего_действия}
+# Храним время последнего сообщения {user_id: timestamp}
 user_cooldowns = {}
 
 # --- БАЗА ДАННЫХ ---
@@ -32,12 +32,14 @@ def get_main_kb(user_id):
     if user_id in ADMIN_IDS: kb.append([KeyboardButton(text="📊 Статистика")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-# Функция проверки флуда
+# Улучшенная функция анти-флуда
 def is_flooding(user_id):
     current_time = time.time()
     last_time = user_cooldowns.get(user_id, 0)
+    
     if current_time - last_time < COOLDOWN_SECONDS:
-        return True
+        return True # Спам обнаружен
+    
     user_cooldowns[user_id] = current_time
     return False
 
@@ -59,7 +61,8 @@ async def notify_admins(message, mode, target_user=None):
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    if is_flooding(message.from_user.id): return # Блокировка
+    if is_flooding(message.from_user.id): return # Игнорируем полностью
+    
     init_db()
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("-100"):
@@ -71,21 +74,15 @@ async def start(message: types.Message):
 
 @dp.message(F.text == "👤 Моя личная ссылка")
 async def show_my_link(message: types.Message):
-    if is_flooding(message.from_user.id): return # Блокировка
+    if is_flooding(message.from_user.id): return # Игнорируем спам-нажатия
+    
     me = await bot.get_me()
     await message.answer(f"Твоя ссылка:\n<code>https://t.me/{me.username}?start={message.from_user.id}</code>")
 
 @dp.message(F.text == "➕ Подключить группу")
 async def how_to_connect(message: types.Message):
-    if is_flooding(message.from_user.id): return # Блокировка
+    if is_flooding(message.from_user.id): return
     await message.answer("Чтобы подключить группу, добавь бота в админы и напиши <code>/setup</code>")
-
-@dp.message(F.text == "/setup")
-async def setup_group(message: types.Message):
-    # В группах антифлуд обычно не ставят, чтобы не мешать всем, но если надо — можно добавить
-    if message.chat.type in ["group", "supergroup"]:
-        me = await bot.get_me()
-        await message.answer(f"✅ Группа готова!\nСсылка: <code>https://t.me/{me.username}?start={message.chat.id}</code>")
 
 @dp.message(F.text == "📊 Статистика")
 async def show_stats(message: types.Message):
@@ -98,9 +95,14 @@ async def show_stats(message: types.Message):
 
 @dp.message(F.text)
 async def handle_all_messages(message: types.Message):
-    if is_flooding(message.from_user.id): return # Блокировка любого текста
+    # Если это ответ на сообщение бота (анонимка)
+    if not message.reply_to_message:
+        return
 
-    if not message.reply_to_message: return
+    # Проверка на спам ТОЛЬКО для отправки сообщений
+    if is_flooding(message.from_user.id):
+        return
+
     reply_text = message.reply_to_message.text
 
     # 1. В ГРУППУ
@@ -112,7 +114,7 @@ async def handle_all_messages(message: types.Message):
             await notify_admins(message, f"ГРУППА {target_group}")
         except: await message.answer("❌ Ошибка отправки.")
 
-    # 2. ЛИЧНО (Аноним -> Юзеру)
+    # 2. ЛИЧНО
     elif "Пиши анонимно для ID" in reply_text:
         target_id = re.findall(r'\d+', reply_text)[0]
         try:
@@ -124,18 +126,18 @@ async def handle_all_messages(message: types.Message):
             await message.answer("✅ Доставлено!")
             target_chat = await bot.get_chat(target_id)
             await notify_admins(message, "ЛИЧНО", target_user=target_chat)
-        except: await message.answer("❌ Пользователь заблокировал бота.")
+        except: await message.answer("❌ Ошибка.")
 
-    # 3. ОТВЕТ (Юзер -> Анониму)
+    # 3. ОТВЕТ
     elif "Новый анонимный вопрос" in reply_text:
         conn = sqlite3.connect("anonymous_pro.db")
         res = conn.execute("SELECT author_id FROM replies WHERE msg_id = ?", (message.reply_to_message.message_id,)).fetchone()
         conn.close()
         if res:
             try:
-                await bot.send_message(res[0], f"💬 <b>Тебе пришел ответ на вопрос:</b>\n\n{message.text}")
+                await bot.send_message(res[0], f"💬 <b>Тебе пришел ответ:</b>\n\n{message.text}")
                 await message.answer("✅ Ответ отправлен!")
-            except: await message.answer("❌ Не удалось отправить ответ.")
+            except: await message.answer("❌ Ошибка.")
 
 async def main():
     init_db()
