@@ -15,10 +15,9 @@ COOLDOWN_SECONDS = 5
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher()
 
-# Хранилище времени последнего действия
+# Хранилище времени последнего действия (в памяти)
 user_last_time = {}
 
-# --- БАЗА ДАННЫХ ---
 def init_db():
     conn = sqlite3.connect("anonymous_pro.db")
     cursor = conn.cursor()
@@ -27,14 +26,13 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Клавиатура (только для личных сообщений)
 def get_main_kb(user_id):
     kb = [[KeyboardButton(text="👤 Моя личная ссылка")], [KeyboardButton(text="➕ Подключить группу")]]
     if user_id in ADMIN_IDS:
         kb.append([KeyboardButton(text="📊 Статистика")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-# Функция задержки
+# Функция задержки: вернет True, если это спам
 def is_spam(user_id):
     curr = time.time()
     last = user_last_time.get(user_id, 0)
@@ -47,9 +45,9 @@ def is_spam(user_id):
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    # Если нажал старт в группе — удаляем кнопки
+    # Если старт в группе — ЖЕСТКО удаляем кнопки
     if message.chat.type != "private":
-        await message.answer("В группах кнопки не поддерживаются. Перейдите в ЛС бота.", reply_markup=ReplyKeyboardRemove())
+        await message.answer("Кнопки только для личных сообщений бота!", reply_markup=ReplyKeyboardRemove())
         return
 
     if is_spam(message.from_user.id): return
@@ -59,16 +57,17 @@ async def start(message: types.Message):
     if len(args) > 1:
         await message.answer("🤫 Напиши сообщение в ответ на это (Reply), чтобы отправить его анонимно.")
     else:
-        await message.answer("Привет! Используй кнопки ниже:", reply_markup=get_main_kb(message.from_user.id))
+        await message.answer("Привет! Кнопки управления доступны ниже:", reply_markup=get_main_kb(message.from_user.id))
 
 @dp.message(F.text == "👤 Моя личная ссылка")
 async def my_link(message: types.Message):
-    # Если кнопка нажата в группе — удаляем её нафиг
+    # Если вдруг кнопка осталась в группе и её нажали
     if message.chat.type != "private":
-        await message.answer("Кнопки только для ЛС!", reply_markup=ReplyKeyboardRemove())
+        await message.answer("Удаляю кнопки...", reply_markup=ReplyKeyboardRemove())
         return
     
     if is_spam(message.from_user.id): return
+    
     me = await bot.get_me()
     await message.answer(f"Твоя ссылка:\n<code>https://t.me/{me.username}?start={message.from_user.id}</code>")
 
@@ -77,42 +76,35 @@ async def setup_group(message: types.Message):
     if message.chat.type in ["group", "supergroup"]:
         me = await bot.get_me()
         link = f"https://t.me/{me.username}?start={message.chat.id}"
-        # ReplyKeyboardRemove() — самая важная часть здесь
-        await message.answer(f"✅ <b>Настройка завершена</b>\nСсылка: <code>{link}</code>", reply_markup=ReplyKeyboardRemove())
-    else:
-        await message.answer("Эту команду нужно вводить в группе.")
+        await message.answer(f"✅ Настроено!\nСсылка: <code>{link}</code>", reply_markup=ReplyKeyboardRemove())
 
 @dp.message(F.text)
 async def handle_msg(message: types.Message):
-    # В ЛС проверяем на спам
+    # Если это личка и спам — игнорим
     if message.chat.type == "private" and is_spam(message.from_user.id):
         return
 
     if not message.reply_to_message: return
     r_text = message.reply_to_message.text
 
-    # Логика отправки анонимки (упрощенный поиск ID или признака группы)
+    # Отправка анонимки
     if "Напиши сообщение в ответ" in r_text or "анонимно для ID" in r_text:
-        # Ищем ID пользователя или определяем, что это группа
-        ids = re.findall(r'-?\d+', r_text) # Ищем цифры (включая - для групп)
+        ids = re.findall(r'-?\d+', r_text)
         if ids:
             target = ids[0]
             try:
-                sent = await bot.send_message(target, f"📩 <b>Новое анонимное сообщение:</b>\n\n{message.text}")
-                
-                # Сохраняем для ответов (только если это личка, ID положительный)
+                sent = await bot.send_message(target, f"📩 <b>Новая анонимка:</b>\n\n{message.text}")
                 if not target.startswith("-"):
                     conn = sqlite3.connect("anonymous_pro.db")
                     conn.execute("INSERT INTO replies VALUES (?, ?)", (sent.message_id, message.from_user.id))
                     conn.commit()
                     conn.close()
-                
                 await message.answer("✅ Отправлено!")
             except:
-                await message.answer("❌ Ошибка отправки (возможно, бот заблокирован или нет прав).")
+                await message.answer("❌ Ошибка.")
 
-    # Ответ на анонимку
-    elif "Новое анонимное сообщение" in r_text:
+    # Ответ
+    elif "Новая анонимка" in r_text:
         conn = sqlite3.connect("anonymous_pro.db")
         res = conn.execute("SELECT author_id FROM replies WHERE msg_id = ?", (message.reply_to_message.message_id,)).fetchone()
         conn.close()
@@ -121,12 +113,12 @@ async def handle_msg(message: types.Message):
                 await bot.send_message(res[0], f"💬 <b>Тебе ответили:</b>\n\n{message.text}")
                 await message.answer("✅ Ответ отправлен!")
             except:
-                await message.answer("❌ Не удалось доставить ответ.")
+                await message.answer("❌ Ошибка.")
 
 async def main():
+    print("--- БОТ ЗАПУЩЕН С ЗАЩИТОЙ ---")
     init_db()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
