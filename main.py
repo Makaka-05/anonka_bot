@@ -3,14 +3,19 @@ import asyncio
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.client.default import DefaultBotProperties # Добавили эту строку
 
 # --- НАСТРОЙКИ ---
-TOKEN = "8720756817:AAH9gtMpM8K1RlEVUZVcw_ulnWrMPDsYY70"
-# Добавь сюда свой ID и ID друга через запятую
-ADMIN_IDS = [5275461907, 7919798306] 
+TOKEN = "8720756817:AAExiIOUVysF5-uRZhtvahFTRR5Sn0j8XC0"
+ADMIN_IDS = [7919798306, 5275461907] # Замени на свой ID
 
-bot = Bot(token=TOKEN, parse_mode="HTML")
+# ТУТ ИСПРАВЛЕНО:
+bot = Bot(
+    token=TOKEN, 
+    default_bot_properties=DefaultBotProperties(parse_mode="HTML")
+)
 dp = Dispatcher()
+
 
 # --- БАЗА ДАННЫХ ---
 def setup_db():
