@@ -19,8 +19,8 @@ from aiogram.types import (
 
 # Токен и id админа берутся из переменных окружения (их задают на хостинге),
 # поэтому в этом файле ничего менять не нужно.
-BOT_TOKEN = os.getenv("8829444200:AAFT5TDzxjxYqBLLwJTnotS06YHAhhACKLM")
-ADMIN_ID = int(os.getenv("5275461907", "0"))
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 if not BOT_TOKEN or not ADMIN_ID:
     raise SystemExit("Не заданы переменные окружения BOT_TOKEN и ADMIN_ID")
