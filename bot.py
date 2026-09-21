@@ -4,6 +4,7 @@ import logging
 import os
 import secrets
 import sqlite3
+from urllib.parse import quote, urlencode
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -13,8 +14,10 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
     ChatMemberUpdated,
+    CopyTextButton,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LinkPreviewOptions,
     Message,
 )
 
@@ -28,7 +31,6 @@ if not BOT_TOKEN or not ADMIN_ID:
 
 NOTICE = (
     "ℹ️ Получатель не увидит, кто написал сообщение. "
-    "Сообщения сохраняются для модерации (защита от спама и травли)."
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -78,23 +80,42 @@ def mention(user_id: int, name: str, username: str | None) -> str:
     return text
 
 
-MAIN_KB = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📩 В ЛС", callback_data="menu:dm"),
-            InlineKeyboardButton(text="👥 В группу", callback_data="menu:group"),
+async def send_my_link(message: Message, bot: Bot, code: str):
+    me = await bot.get_me()
+    link = f"https://t.me/{me.username}?start={code}"
+    share = "https://t.me/share/url?" + urlencode(
+        {"url": link, "text": "Напиши мне анонимно 👀"}, quote_via=quote
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Скопировать ссылку", copy_text=CopyTextButton(text=link))],
+            [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=share)],
+            [
+                InlineKeyboardButton(
+                    text="👥 Добавить бота в чат",
+                    url=f"https://t.me/{me.username}?startgroup=true",
+                )
+            ],
         ]
-    ]
-)
+    )
+    await message.answer(
+        "Начни получать анонимные вопросы прямо сейчас 👀\n\n"
+        "🔗 Ссылка для получения анонимных вопросов:\n\n"
+        f"<code>{link}</code>\n\n"
+        "Размести эту ссылку ☝️ в описании профиля, чтобы тебе могли написать.\n\n"
+        f"{NOTICE}",
+        reply_markup=kb,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
 
 
 # ---------- /start ----------
 @dp.message(CommandStart())
-async def start(message: Message, command: CommandObject):
+async def start(message: Message, command: CommandObject, bot: Bot):
     user = message.from_user
     if is_banned(user.id):
         return
-    register(user)
+    code = register(user)
 
     # Зашли по чужой ссылке
     if command.args:
@@ -113,58 +134,8 @@ async def start(message: Message, command: CommandObject):
             await message.answer(f"✍️ Напиши сообщение, и я передам его анонимно.\n\n{NOTICE}")
             return
 
-    # Обычный /start — главное меню
-    await message.answer(
-        "👋 Здесь можно получать анонимные сообщения.\n\n"
-        "Куда подключить бота?\n\n"
-        f"{NOTICE}",
-        reply_markup=MAIN_KB,
-    )
-
-
-@dp.callback_query(F.data.startswith("menu:"))
-async def menu(callback: CallbackQuery, bot: Bot):
-    user = callback.from_user
-    if is_banned(user.id):
-        await callback.answer()
-        return
-    code = register(user)
-    me = await bot.get_me()
-    action = callback.data.split(":")[1]
-
-    if action == "dm":
-        link = f"https://t.me/{me.username}?start={code}"
-        await callback.message.answer(
-            f"📩 Твоя личная ссылка:\n{link}\n\n"
-            "Повесь её в описание профиля. Кто перейдёт по ней, сможет написать "
-            "тебе анонимно.\n\n"
-            f"{NOTICE}"
-        )
-    else:
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="➕ Добавить в группу",
-                        url=f"https://t.me/{me.username}?startgroup=true",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="➕ Добавить в канал",
-                        url=f"https://t.me/{me.username}?startchannel=true&admin=post_messages",
-                    )
-                ],
-            ]
-        )
-        await callback.message.answer(
-            "👥 Добавь бота в свою группу или канал. Он сам опубликует там сообщение "
-            "с кнопкой «Написать анонимно», которая ведёт на твою личную ссылку.\n\n"
-            "Для канала бот должен быть админом с правом публикации "
-            "(это выбирается при добавлении).",
-            reply_markup=kb,
-        )
-    await callback.answer()
+    # Обычный /start — выдаём личную ссылку
+    await send_my_link(message, bot, code)
 
 
 # ---------- бота добавили в группу или канал ----------
@@ -210,6 +181,41 @@ async def unban(message: Message, command: CommandObject):
     await message.answer("Разбанен.")
 
 
+@dp.message(Command("banned"))
+async def banned_list(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    rows = db.execute(
+        "SELECT b.user_id, u.name, u.username FROM banned b "
+        "LEFT JOIN users u ON u.user_id = b.user_id"
+    ).fetchall()
+    if not rows:
+        await message.answer("Список банов пуст.")
+        return
+    for user_id, name, username in rows:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Разбанить", callback_data=f"unban:{user_id}")]
+            ]
+        )
+        await message.answer(
+            f"🚫 {mention(user_id, name, username)} <code>{user_id}</code>",
+            reply_markup=kb,
+        )
+
+
+@dp.callback_query(F.data.startswith("unban:"))
+async def unban_button(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer()
+        return
+    user_id = int(callback.data.split(":")[1])
+    db.execute("DELETE FROM banned WHERE user_id=?", (user_id,))
+    db.commit()
+    await callback.answer("Разбанен")
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+
 # ---------- пересылка сообщений ----------
 @dp.message(F.chat.type == "private")
 async def relay(message: Message, bot: Bot):
@@ -218,7 +224,7 @@ async def relay(message: Message, bot: Bot):
         return
 
     if message.text and message.text.startswith("/"):
-        await message.answer("Неизвестная команда. Отправь /start, чтобы открыть меню.")
+        await message.answer("Неизвестная команда. Отправь /start, чтобы получить свою ссылку.")
         return
 
     row = db.execute(
@@ -252,7 +258,11 @@ async def relay(message: Message, bot: Bot):
         ]
     )
     try:
-        await bot.send_message(ADMIN_ID, f"👁 {sender_text} → {target_text}", reply_markup=kb)
+        await bot.send_message(
+            ADMIN_ID,
+            f"👁 {sender_text} <code>{user.id}</code> → {target_text}",
+            reply_markup=kb,
+        )
         await bot.copy_message(ADMIN_ID, message.chat.id, message.message_id)
     except (TelegramForbiddenError, TelegramBadRequest):
         logging.warning("Не могу написать админу. Открой бота и нажми /start с админ-аккаунта.")
