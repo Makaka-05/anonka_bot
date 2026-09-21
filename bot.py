@@ -40,9 +40,11 @@ MODERATION = True
 
 NOTICE = (
     "ℹ️ Получатель не увидит, кто написал сообщение. "
+
 )
 NOTICE_CHANNEL = (
     "ℹ️ Твоё имя не будет опубликовано. "
+
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -63,6 +65,15 @@ db.execute("CREATE TABLE IF NOT EXISTS banned (user_id INTEGER PRIMARY KEY)")
 db.execute(
     "CREATE TABLE IF NOT EXISTS channels ("
     "chat_id INTEGER PRIMARY KEY, code TEXT UNIQUE, owner_id INTEGER, title TEXT)"
+)
+# очередь сообщений для канала: у каждого модератора своя копия с кнопками
+db.execute(
+    "CREATE TABLE IF NOT EXISTS pending ("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, status TEXT DEFAULT 'new')"
+)
+db.execute(
+    "CREATE TABLE IF NOT EXISTS pending_copies ("
+    "pending_id INTEGER, reviewer_id INTEGER, message_id INTEGER)"
 )
 db.commit()
 
@@ -276,11 +287,22 @@ async def unban_button(callback: CallbackQuery):
 
 
 # ---------- доставка сообщений ----------
+async def send_quoted(bot: Bot, target_id: int, message: Message):
+    """Текст приходит в виде цитаты, остальное (фото, голосовые...) — заголовок и копия."""
+    header = "🔔 У Вас новое сообщение!"
+    if message.text and len(message.text) <= 3500:
+        await bot.send_message(
+            target_id, f"{header}\n\n<blockquote>{html.escape(message.text)}</blockquote>"
+        )
+    else:
+        await bot.send_message(target_id, header)
+        await bot.copy_message(target_id, message.chat.id, message.message_id)
+
+
 async def deliver_to_user(message: Message, bot: Bot, target_id: int):
     """Личное сообщение владельцу ссылки. Возвращает (ответ, получатель для лога) или None."""
     try:
-        await bot.send_message(target_id, "📩 Новое анонимное сообщение:")
-        await bot.copy_message(target_id, message.chat.id, message.message_id)
+        await send_quoted(bot, target_id, message)
     except (TelegramForbiddenError, TelegramBadRequest):
         await message.answer("❌ Не удалось доставить: получатель остановил бота.")
         return None
@@ -301,30 +323,54 @@ async def deliver_to_chat(message: Message, bot: Bot, chat_id: int):
         return None
     owner_id, title = ch
     title_text = html.escape(title or "канал")
-    try:
-        if MODERATION:
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"pub:{chat_id}"),
-                        InlineKeyboardButton(text="❌ Отклонить", callback_data="rej"),
-                    ]
-                ]
-            )
-            await bot.send_message(
-                owner_id, f"📥 Новое сообщение для «{title_text}», ждёт проверки:"
-            )
-            await bot.copy_message(
-                owner_id, message.chat.id, message.message_id, reply_markup=kb
-            )
-            reply = "✅ Отправлено на проверку. Если модератор одобрит, сообщение появится в канале."
-        else:
+    target_text = f"канал «{title_text}»"
+
+    if not MODERATION:
+        try:
             await bot.copy_message(chat_id, message.chat.id, message.message_id)
-            reply = "✅ Опубликовано анонимно."
-    except (TelegramForbiddenError, TelegramBadRequest):
+        except (TelegramForbiddenError, TelegramBadRequest):
+            await message.answer("❌ Сейчас не получилось отправить. Попробуй позже.")
+            return None
+        return "✅ Опубликовано анонимно.", target_text
+
+    # Проверка: сообщение с кнопками получают все админы бота и владелец канала
+    cur = db.execute("INSERT INTO pending (chat_id) VALUES (?)", (chat_id,))
+    pid = cur.lastrowid
+    db.commit()
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Опубликовать", callback_data=f"pub:{pid}"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"rej:{pid}"),
+            ]
+        ]
+    )
+    delivered = 0
+    for reviewer_id in ADMIN_IDS | {owner_id}:
+        try:
+            await bot.send_message(
+                reviewer_id, f"📥 Новое сообщение для «{title_text}», ждёт проверки:"
+            )
+            copy = await bot.copy_message(
+                reviewer_id, message.chat.id, message.message_id, reply_markup=kb
+            )
+        except (TelegramForbiddenError, TelegramBadRequest):
+            continue
+        db.execute(
+            "INSERT INTO pending_copies (pending_id, reviewer_id, message_id) VALUES (?, ?, ?)",
+            (pid, reviewer_id, copy.message_id),
+        )
+        delivered += 1
+    db.commit()
+    if not delivered:
+        db.execute("DELETE FROM pending WHERE id=?", (pid,))
+        db.commit()
         await message.answer("❌ Сейчас не получилось отправить. Попробуй позже.")
         return None
-    return reply, f"канал «{title_text}»"
+    return (
+        "✅ Отправлено на проверку. Если модератор одобрит, сообщение появится в канале.",
+        target_text,
+    )
 
 
 @dp.message(F.chat.type == "private")
@@ -380,31 +426,86 @@ async def relay(message: Message, bot: Bot):
 
 
 # ---------- проверка сообщений для канала ----------
+def can_moderate(user_id: int, chat_id: int) -> bool:
+    if user_id in ADMIN_IDS:
+        return True
+    row = db.execute("SELECT owner_id FROM channels WHERE chat_id=?", (chat_id,)).fetchone()
+    return bool(row and row[0] == user_id)
+
+
+async def close_pending(bot: Bot, pid: int, label: str):
+    """Заменяет кнопки на итог у всех модераторов, чтобы никто не нажал второй раз."""
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=label[:60], callback_data="noop")]]
+    )
+    rows = db.execute(
+        "SELECT reviewer_id, message_id FROM pending_copies WHERE pending_id=?", (pid,)
+    ).fetchall()
+    for reviewer_id, message_id in rows:
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=reviewer_id, message_id=message_id, reply_markup=kb
+            )
+        except (TelegramForbiddenError, TelegramBadRequest):
+            pass
+
+
 @dp.callback_query(F.data.startswith("pub:"))
 async def publish(callback: CallbackQuery, bot: Bot):
-    chat_id = int(callback.data.split(":")[1])
-    ch = db.execute("SELECT owner_id FROM channels WHERE chat_id=?", (chat_id,)).fetchone()
-    if not ch or (callback.from_user.id != ch[0] and callback.from_user.id not in ADMIN_IDS):
+    pid = int(callback.data.split(":")[1])
+    row = db.execute("SELECT chat_id FROM pending WHERE id=?", (pid,)).fetchone()
+    if not row:
+        await callback.answer("Эта кнопка устарела.", show_alert=True)
+        return
+    chat_id = row[0]
+    if not can_moderate(callback.from_user.id, chat_id):
         await callback.answer()
+        return
+    cur = db.execute(
+        "UPDATE pending SET status='published' WHERE id=? AND status='new'", (pid,)
+    )
+    db.commit()
+    if cur.rowcount == 0:
+        await callback.answer("Уже обработано другим модератором.", show_alert=True)
         return
     try:
         await bot.copy_message(chat_id, callback.message.chat.id, callback.message.message_id)
     except (TelegramForbiddenError, TelegramBadRequest):
+        db.execute("UPDATE pending SET status='new' WHERE id=?", (pid,))
+        db.commit()
         await callback.answer(
             "Не удалось опубликовать. Проверь, что бот админ канала с правом публикации.",
             show_alert=True,
         )
         return
     await callback.answer("Опубликовано")
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.reply("✅ Опубликовано")
+    await close_pending(bot, pid, f"✅ Опубликовано — {callback.from_user.full_name}")
 
 
-@dp.callback_query(F.data == "rej")
-async def reject(callback: CallbackQuery):
+@dp.callback_query(F.data.startswith("rej:"))
+async def reject(callback: CallbackQuery, bot: Bot):
+    pid = int(callback.data.split(":")[1])
+    row = db.execute("SELECT chat_id FROM pending WHERE id=?", (pid,)).fetchone()
+    if not row:
+        await callback.answer("Эта кнопка устарела.", show_alert=True)
+        return
+    if not can_moderate(callback.from_user.id, row[0]):
+        await callback.answer()
+        return
+    cur = db.execute(
+        "UPDATE pending SET status='rejected' WHERE id=? AND status='new'", (pid,)
+    )
+    db.commit()
+    if cur.rowcount == 0:
+        await callback.answer("Уже обработано другим модератором.", show_alert=True)
+        return
     await callback.answer("Отклонено")
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.reply("❌ Отклонено")
+    await close_pending(bot, pid, f"❌ Отклонено — {callback.from_user.full_name}")
+
+
+@dp.callback_query(F.data == "noop")
+async def noop(callback: CallbackQuery):
+    await callback.answer()
 
 
 # ---------- бан ----------
