@@ -24,9 +24,13 @@ from aiogram.types import (
 # Токен и id админа берутся из переменных окружения (их задают на хостинге),
 # поэтому в этом файле токен и id вписывать не нужно.
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+# ADMIN_ID — один id или несколько через запятую: 111111111,222222222
+# Все они получают логи (кто кому написал) и могут банить/разбанивать.
+ADMIN_IDS = {
+    int(x) for x in os.getenv("ADMIN_ID", "").replace(" ", "").split(",") if x.isdigit()
+}
 
-if not BOT_TOKEN or not ADMIN_ID:
+if not BOT_TOKEN or not ADMIN_IDS:
     raise SystemExit("Не заданы переменные окружения BOT_TOKEN и ADMIN_ID")
 
 # True  — сообщения для канала сначала приходят владельцу канала на проверку
@@ -36,11 +40,9 @@ MODERATION = True
 
 NOTICE = (
     "ℹ️ Получатель не увидит, кто написал сообщение. "
-  
 )
 NOTICE_CHANNEL = (
     "ℹ️ Твоё имя не будет опубликовано. "
-    
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -107,8 +109,14 @@ async def send_my_link(message: Message, bot: Bot, code: str):
             [InlineKeyboardButton(text="📤 Поделиться ссылкой", url=share)],
             [
                 InlineKeyboardButton(
-                    text="👥 Добавить бота в чат",
+                    text="👥 Добавить бота в группу",
                     url=f"https://t.me/{me.username}?startgroup=true",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📢 Добавить бота в канал",
+                    url=f"https://t.me/{me.username}?startchannel=true&admin=post_messages",
                 )
             ],
         ]
@@ -222,7 +230,7 @@ async def added_to_chat(event: ChatMemberUpdated, bot: Bot):
 # ---------- админские команды ----------
 @dp.message(Command("unban"))
 async def unban(message: Message, command: CommandObject):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_IDS:
         return
     if not command.args or not command.args.strip().isdigit():
         await message.answer("Использование: /unban 123456789")
@@ -234,7 +242,7 @@ async def unban(message: Message, command: CommandObject):
 
 @dp.message(Command("banned"))
 async def banned_list(message: Message):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_IDS:
         return
     rows = db.execute(
         "SELECT b.user_id, u.name, u.username FROM banned b "
@@ -257,7 +265,7 @@ async def banned_list(message: Message):
 
 @dp.callback_query(F.data.startswith("unban:"))
 async def unban_button(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if callback.from_user.id not in ADMIN_IDS:
         await callback.answer()
         return
     user_id = int(callback.data.split(":")[1])
@@ -355,15 +363,18 @@ async def relay(message: Message, bot: Bot):
             [InlineKeyboardButton(text="🚫 Забанить отправителя", callback_data=f"ban:{user.id}")]
         ]
     )
-    try:
-        await bot.send_message(
-            ADMIN_ID,
-            f"👁 {sender_text} <code>{user.id}</code> → {target_text}",
-            reply_markup=kb,
-        )
-        await bot.copy_message(ADMIN_ID, message.chat.id, message.message_id)
-    except (TelegramForbiddenError, TelegramBadRequest):
-        logging.warning("Не могу написать админу. Открой бота и нажми /start с админ-аккаунта.")
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"👁 {sender_text} <code>{user.id}</code> → {target_text}",
+                reply_markup=kb,
+            )
+            await bot.copy_message(admin_id, message.chat.id, message.message_id)
+        except (TelegramForbiddenError, TelegramBadRequest):
+            logging.warning(
+                "Не могу написать модератору %s: пусть откроет бота и нажмёт /start.", admin_id
+            )
 
     await message.answer(reply)
 
@@ -373,7 +384,7 @@ async def relay(message: Message, bot: Bot):
 async def publish(callback: CallbackQuery, bot: Bot):
     chat_id = int(callback.data.split(":")[1])
     ch = db.execute("SELECT owner_id FROM channels WHERE chat_id=?", (chat_id,)).fetchone()
-    if not ch or callback.from_user.id not in (ch[0], ADMIN_ID):
+    if not ch or (callback.from_user.id != ch[0] and callback.from_user.id not in ADMIN_IDS):
         await callback.answer()
         return
     try:
@@ -399,7 +410,7 @@ async def reject(callback: CallbackQuery):
 # ---------- бан ----------
 @dp.callback_query(F.data.startswith("ban:"))
 async def ban(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if callback.from_user.id not in ADMIN_IDS:
         await callback.answer()
         return
     user_id = int(callback.data.split(":")[1])
