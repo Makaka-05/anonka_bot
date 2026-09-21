@@ -327,13 +327,19 @@ async def unban_button(callback: CallbackQuery):
 
 
 # ---------- доставка сообщений ----------
+def as_quote(message: Message) -> str | None:
+    """Текстовое сообщение в виде цитаты (HTML) или None для фото, голосовых и т.п."""
+    if message.text and len(message.text) <= 3800:
+        return f"<blockquote>{html.escape(message.text)}</blockquote>"
+    return None
+
+
 async def send_quoted(bot: Bot, target_id: int, message: Message):
     """Текст приходит в виде цитаты, остальное (фото, голосовые...) — заголовок и копия."""
     header = "🔔 У Вас новое сообщение!"
-    if message.text and len(message.text) <= 3500:
-        await bot.send_message(
-            target_id, f"{header}\n\n<blockquote>{html.escape(message.text)}</blockquote>"
-        )
+    quote = as_quote(message)
+    if quote:
+        await bot.send_message(target_id, f"{header}\n\n{quote}")
     else:
         await bot.send_message(target_id, header)
         await bot.copy_message(target_id, message.chat.id, message.message_id)
@@ -374,7 +380,11 @@ async def deliver_to_chat(message: Message, bot: Bot, chat_id: int):
 
     if not MODERATION:
         try:
-            await bot.copy_message(chat_id, message.chat.id, message.message_id)
+            quote = as_quote(message)
+            if quote:
+                await bot.send_message(chat_id, quote)
+            else:
+                await bot.copy_message(chat_id, message.chat.id, message.message_id)
         except (TelegramForbiddenError, TelegramBadRequest):
             await message.answer("❌ Сейчас не получилось отправить. Попробуй позже.")
             return None
@@ -398,14 +408,18 @@ async def deliver_to_chat(message: Message, bot: Bot, chat_id: int):
             await bot.send_message(
                 reviewer_id, f"📥 Новое сообщение для «{title_text}», ждёт проверки:"
             )
-            copy = await bot.copy_message(
-                reviewer_id, message.chat.id, message.message_id, reply_markup=kb
-            )
+            quote = as_quote(message)
+            if quote:
+                sent = await bot.send_message(reviewer_id, quote, reply_markup=kb)
+            else:
+                sent = await bot.copy_message(
+                    reviewer_id, message.chat.id, message.message_id, reply_markup=kb
+                )
         except (TelegramForbiddenError, TelegramBadRequest):
             continue
         db.execute(
             "INSERT INTO pending_copies (pending_id, reviewer_id, message_id) VALUES (?, ?, ?)",
-            (pid, reviewer_id, copy.message_id),
+            (pid, reviewer_id, sent.message_id),
         )
         delivered += 1
     db.commit()
