@@ -1,9 +1,12 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import html
 import logging
 import os
-import secrets
 import sqlite3
+import struct
 from urllib.parse import quote, urlencode
 
 from aiogram import Bot, Dispatcher, F
@@ -40,11 +43,9 @@ MODERATION = True
 
 NOTICE = (
     "ℹ️ Получатель не увидит, кто написал сообщение. "
-
 )
 NOTICE_CHANNEL = (
     "ℹ️ Твоё имя не будет опубликовано. "
-
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -78,25 +79,81 @@ db.execute(
 db.commit()
 
 
+# ---------- постоянные ссылки ----------
+# Код в ссылке содержит id владельца (зашифрован), поэтому ссылки работают
+# даже если база bot.db на хостинге была стёрта при пересборке.
+# LINK_SECRET — любая случайная строка (необязательная переменная окружения).
+# Если её не задать, используется токен бота: при смене токена ссылки поменяются.
+SECRET = (os.getenv("LINK_SECRET") or BOT_TOKEN).encode()
+
+
+def _xor(a: bytes, b: bytes) -> bytes:
+    return bytes(x ^ y for x, y in zip(a, b))
+
+
+def make_code(kind: str, value: int) -> str:
+    """kind: 'u' — пользователь, 'c' — канал или группа."""
+    body = struct.pack(">q", value)
+    tag = hmac.new(SECRET, b"n" + kind.encode() + body, hashlib.sha256).digest()[:6]
+    stream = hmac.new(SECRET, b"s" + tag, hashlib.sha256).digest()[:8]
+    raw = tag + _xor(body, stream)
+    return kind + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def parse_code(code: str):
+    """Возвращает (kind, value) или None, если код не наш."""
+    if len(code) < 2 or code[0] not in ("u", "c"):
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(code[1:] + "=" * (-len(code[1:]) % 4))
+    except Exception:
+        return None
+    if len(raw) != 14:
+        return None
+    kind = code[0]
+    tag, enc = raw[:6], raw[6:]
+    stream = hmac.new(SECRET, b"s" + tag, hashlib.sha256).digest()[:8]
+    body = _xor(enc, stream)
+    expected = hmac.new(SECRET, b"n" + kind.encode() + body, hashlib.sha256).digest()[:6]
+    if not hmac.compare_digest(tag, expected):
+        return None
+    return kind, struct.unpack(">q", body)[0]
+
+
+async def resolve_target(bot: Bot, arg: str):
+    """По коду из ссылки возвращает (id получателя, название канала или None) либо None."""
+    parsed = parse_code(arg)
+    if parsed:
+        kind, value = parsed
+        if kind == "u":
+            return value, None
+        try:
+            chat = await bot.get_chat(value)
+        except (TelegramBadRequest, TelegramForbiddenError):
+            return None
+        return value, chat.title
+    # старые ссылки, созданные до обновления (если база ещё жива)
+    row = db.execute("SELECT user_id FROM users WHERE code=?", (arg,)).fetchone()
+    if row:
+        return row[0], None
+    ch = db.execute("SELECT chat_id, title FROM channels WHERE code=?", (arg,)).fetchone()
+    if ch:
+        return ch[0], ch[1]
+    return None
+
+
 def is_banned(user_id: int) -> bool:
     return db.execute("SELECT 1 FROM banned WHERE user_id=?", (user_id,)).fetchone() is not None
 
 
 def register(user) -> str:
-    """Создаёт пользователя (если нет) и возвращает его личный код."""
-    row = db.execute("SELECT code FROM users WHERE user_id=?", (user.id,)).fetchone()
-    if row:
-        code = row[0]
-        db.execute(
-            "UPDATE users SET name=?, username=? WHERE user_id=?",
-            (user.full_name, user.username, user.id),
-        )
-    else:
-        code = secrets.token_urlsafe(6)
-        db.execute(
-            "INSERT INTO users (user_id, code, name, username) VALUES (?, ?, ?, ?)",
-            (user.id, code, user.full_name, user.username),
-        )
+    """Запоминает имя пользователя и возвращает его личный код."""
+    code = make_code("u", user.id)
+    db.execute(
+        "INSERT INTO users (user_id, code, name, username) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET name=excluded.name, username=excluded.username",
+        (user.id, code, user.full_name, user.username),
+    )
     db.commit()
     return code
 
@@ -153,36 +210,26 @@ async def start(message: Message, command: CommandObject, bot: Bot):
 
     # Зашли по чужой ссылке
     if command.args:
-        row = db.execute(
-            "SELECT user_id FROM users WHERE code=?", (command.args,)
-        ).fetchone()
-        if row:
-            if row[0] != user.id:
-                db.execute(
-                    "INSERT OR REPLACE INTO sessions (sender_id, target_id) VALUES (?, ?)",
-                    (user.id, row[0]),
-                )
-                db.commit()
-                await message.answer(f"✍️ Напиши сообщение, и я передам его анонимно.\n\n{NOTICE}")
-                return
-            # это собственная ссылка — ниже покажем её
-        else:
-            ch = db.execute(
-                "SELECT chat_id, title FROM channels WHERE code=?", (command.args,)
-            ).fetchone()
-            if not ch:
-                await message.answer("Ссылка недействительна.")
-                return
+        target = await resolve_target(bot, command.args)
+        if target is None:
+            await message.answer("Ссылка недействительна.")
+            return
+        target_id, title = target
+        if target_id != user.id:
             db.execute(
                 "INSERT OR REPLACE INTO sessions (sender_id, target_id) VALUES (?, ?)",
-                (user.id, ch[0]),
+                (user.id, target_id),
             )
             db.commit()
-            await message.answer(
-                f"✍️ Напиши сообщение — оно появится в «{html.escape(ch[1] or 'канале')}» "
-                f"без твоего имени.\n\n{NOTICE_CHANNEL}"
-            )
+            if target_id < 0:
+                await message.answer(
+                    f"✍️ Напиши сообщение — оно появится в «{html.escape(title or 'канале')}» "
+                    f"без твоего имени.\n\n{NOTICE_CHANNEL}"
+                )
+            else:
+                await message.answer(f"✍️ Напиши сообщение, и я передам его анонимно.\n\n{NOTICE}")
             return
+        # это собственная ссылка — ниже покажем её
 
     # Обычный /start — выдаём личную ссылку
     await send_my_link(message, bot, code)
@@ -204,19 +251,12 @@ async def added_to_chat(event: ChatMemberUpdated, bot: Bot):
     register(user)
 
     title = event.chat.title or "канал"
-    row = db.execute("SELECT code FROM channels WHERE chat_id=?", (event.chat.id,)).fetchone()
-    if row:
-        code = row[0]
-        db.execute(
-            "UPDATE channels SET owner_id=?, title=? WHERE chat_id=?",
-            (user.id, title, event.chat.id),
-        )
-    else:
-        code = "ch" + secrets.token_urlsafe(6)
-        db.execute(
-            "INSERT INTO channels (chat_id, code, owner_id, title) VALUES (?, ?, ?, ?)",
-            (event.chat.id, code, user.id, title),
-        )
+    code = make_code("c", event.chat.id)
+    db.execute(
+        "INSERT INTO channels (chat_id, code, owner_id, title) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(chat_id) DO UPDATE SET owner_id=excluded.owner_id, title=excluded.title",
+        (event.chat.id, code, user.id, title),
+    )
     db.commit()
 
     me = await bot.get_me()
@@ -309,7 +349,11 @@ async def deliver_to_user(message: Message, bot: Bot, target_id: int):
     target = db.execute(
         "SELECT name, username FROM users WHERE user_id=?", (target_id,)
     ).fetchone()
-    target_text = mention(target_id, target[0], target[1]) if target else str(target_id)
+    target_text = (
+        mention(target_id, target[0], target[1])
+        if target
+        else mention(target_id, "получатель", None)
+    )
     return "✅ Отправлено анонимно.", target_text
 
 
@@ -318,10 +362,13 @@ async def deliver_to_chat(message: Message, bot: Bot, chat_id: int):
     ch = db.execute(
         "SELECT owner_id, title FROM channels WHERE chat_id=?", (chat_id,)
     ).fetchone()
-    if not ch:
-        await message.answer("❌ Этот канал больше недоступен.")
-        return None
-    owner_id, title = ch
+    owner_id, title = ch if ch else (None, None)
+    if title is None:
+        try:
+            title = (await bot.get_chat(chat_id)).title
+        except (TelegramBadRequest, TelegramForbiddenError):
+            await message.answer("❌ Этот канал больше недоступен.")
+            return None
     title_text = html.escape(title or "канал")
     target_text = f"канал «{title_text}»"
 
@@ -346,7 +393,7 @@ async def deliver_to_chat(message: Message, bot: Bot, chat_id: int):
         ]
     )
     delivered = 0
-    for reviewer_id in ADMIN_IDS | {owner_id}:
+    for reviewer_id in ADMIN_IDS | ({owner_id} if owner_id else set()):
         try:
             await bot.send_message(
                 reviewer_id, f"📥 Новое сообщение для «{title_text}», ждёт проверки:"
