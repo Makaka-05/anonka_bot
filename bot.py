@@ -43,9 +43,11 @@ MODERATION = True
 
 NOTICE = (
     "ℹ️ Получатель не увидит, кто написал сообщение. "
+
 )
 NOTICE_CHANNEL = (
     "ℹ️ Твоё имя не будет опубликовано. "
+
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -65,8 +67,12 @@ db.execute(
 db.execute("CREATE TABLE IF NOT EXISTS banned (user_id INTEGER PRIMARY KEY)")
 db.execute(
     "CREATE TABLE IF NOT EXISTS channels ("
-    "chat_id INTEGER PRIMARY KEY, code TEXT UNIQUE, owner_id INTEGER, title TEXT)"
+    "chat_id INTEGER PRIMARY KEY, code TEXT UNIQUE, owner_id INTEGER, title TEXT, mode TEXT)"
 )
+try:
+    db.execute("ALTER TABLE channels ADD COLUMN mode TEXT")
+except sqlite3.OperationalError:
+    pass  # колонка уже есть
 # очередь сообщений для канала: у каждого модератора своя копия с кнопками
 db.execute(
     "CREATE TABLE IF NOT EXISTS pending ("
@@ -140,6 +146,14 @@ async def resolve_target(bot: Bot, arg: str):
     if ch:
         return ch[0], ch[1]
     return None
+
+
+def channel_mode(chat_id: int) -> str:
+    """'manual' — с проверкой, 'auto' — публикуется сразу. По умолчанию берётся MODERATION."""
+    row = db.execute("SELECT mode FROM channels WHERE chat_id=?", (chat_id,)).fetchone()
+    if row and row[0] in ("manual", "auto"):
+        return row[0]
+    return "manual" if MODERATION else "auto"
 
 
 def is_banned(user_id: int) -> bool:
@@ -264,7 +278,7 @@ async def added_to_chat(event: ChatMemberUpdated, bot: Bot):
     kb = InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="✉️ Написать анонимно", url=link)]]
     )
-    when = "после проверки" if MODERATION else "сразу"
+    when = "после проверки" if channel_mode(event.chat.id) == "manual" else "сразу"
     try:
         await bot.send_message(
             event.chat.id,
@@ -289,6 +303,50 @@ async def unban(message: Message, command: CommandObject):
     db.execute("DELETE FROM banned WHERE user_id=?", (int(command.args),))
     db.commit()
     await message.answer("Разбанен.")
+
+
+@dp.message(Command("mode"))
+async def mode_cmd(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    rows = db.execute("SELECT chat_id, title FROM channels").fetchall()
+    if not rows:
+        await message.answer("Ни один канал или группа ещё не подключены.")
+        return
+    for chat_id, title in rows:
+        cur = channel_mode(chat_id)
+        label = "🖐 Ручной (с проверкой)" if cur == "manual" else "⚡ Автоматический"
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=f"Сменить на {'⚡ авто' if cur == 'manual' else '🖐 ручной'}",
+                                       callback_data=f"mode:{chat_id}")]
+            ]
+        )
+        await message.answer(
+            f"«{html.escape(title or 'канал')}»\nТекущий режим: {label}", reply_markup=kb
+        )
+
+
+@dp.callback_query(F.data.startswith("mode:"))
+async def mode_toggle(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer()
+        return
+    chat_id = int(callback.data.split(":")[1])
+    new_mode = "auto" if channel_mode(chat_id) == "manual" else "manual"
+    db.execute("UPDATE channels SET mode=? WHERE chat_id=?", (new_mode, chat_id))
+    db.commit()
+    label = "🖐 Ручной (с проверкой)" if new_mode == "manual" else "⚡ Автоматический"
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"Сменить на {'⚡ авто' if new_mode == 'manual' else '🖐 ручной'}",
+                                   callback_data=f"mode:{chat_id}")]
+        ]
+    )
+    await callback.message.edit_text(
+        callback.message.text.split("\n")[0] + f"\nТекущий режим: {label}", reply_markup=kb
+    )
+    await callback.answer("Режим изменён")
 
 
 @dp.message(Command("banned"))
@@ -378,7 +436,7 @@ async def deliver_to_chat(message: Message, bot: Bot, chat_id: int):
     title_text = html.escape(title or "канал")
     target_text = f"канал «{title_text}»"
 
-    if not MODERATION:
+    if channel_mode(chat_id) == "auto":
         try:
             quote = as_quote(message)
             if quote:
